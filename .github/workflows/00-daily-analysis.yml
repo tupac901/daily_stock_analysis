@@ -1,9 +1,9 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  # 定时触发 - 周一至周五北京时间 08:30 (UTC 00:30)
   schedule:
-    - cron: '30 0 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+    - cron: '30 0 * * 1-5'     # A股交易日由筛选任务进一步检查
   
   # 手动触发
   workflow_dispatch:
@@ -424,6 +424,9 @@ jobs:
           # ==========================================
           # 避免直接写入 STOCK_LIST，保留同名 Environment variables 的 runner 环境值。
           STOCK_LIST_CONFIG: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
+          WATCHLIST_HOLDINGS: ${{ secrets.WATCHLIST_HOLDINGS }}
+          WATCHLIST_SELECTION_OUTPUT: ${{ runner.temp }}/watchlist-selection.json
+          WATCHLIST_FORCE_RUN: ${{ github.event.inputs.force_run || 'false' }}
           MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
           MARKET_REVIEW_COLOR_SCHEME: ${{ vars.MARKET_REVIEW_COLOR_SCHEME || secrets.MARKET_REVIEW_COLOR_SCHEME || 'green_up' }}
           
@@ -454,11 +457,9 @@ jobs:
           # 解析自选股配置：
           # 1. Repository/Environment secrets 或 Repository variables（STOCK_LIST_CONFIG）
           # 2. 同名 Environment variables 注入的 runner 环境变量（STOCK_LIST）
-          # 3. 最小默认值
+          # 3. 空配置时禁止静默替换为默认股票
           if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
             export STOCK_LIST="$STOCK_LIST_CONFIG"
-          elif [ -z "${STOCK_LIST:-}" ]; then
-            export STOCK_LIST="600519"
           fi
 
           # 处理 LITELLM YAML 配置文件
@@ -473,13 +474,27 @@ jobs:
 
           # 判断运行模式
           MODE="${{ github.event.inputs.mode || 'full' }}"
+
+          # Only a validated selection plus holdings reaches the stock analyzer.
+          if [ "$MODE" != "market-only" ]; then
+            python -m src.services.watchlist_digest
+            if [ "$(python -c 'import json,os; print(str(json.load(open(os.environ["WATCHLIST_SELECTION_OUTPUT"], encoding="utf-8")).get("skip", False)).lower())')" = "true" ]; then
+              echo "非 A 股交易日，跳过筛选与推送。"
+              exit 0
+            fi
+            export STOCK_LIST="$(python -c 'import json,os; print(",".join(json.load(open(os.environ["WATCHLIST_SELECTION_OUTPUT"], encoding="utf-8"))["stocks"]))')"
+            if [ -z "$STOCK_LIST" ]; then
+              echo "筛选结果与持仓均为空，终止运行。"
+              exit 1
+            fi
+          fi
           
           echo "=========================================="
           echo "🚀 A股自选股智能分析系统"
           echo "=========================================="
           echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
           echo "🎯 运行模式: $MODE"
-          echo "📊 自选股: $STOCK_LIST"
+          echo "📊 分析目标已从筛选结果和持仓配置生成"
           echo "📝 报告类型: $REPORT_TYPE"
           echo ""
           echo "=========================================="
@@ -558,6 +573,11 @@ jobs:
             python main.py --no-market-review $FORCE_RUN_ARG
           else
             python main.py $FORCE_RUN_ARG
+          fi
+
+          if [ "$MODE" != "market-only" ] && [ "$(python -c 'import json,os; print(str(json.load(open(os.environ["WATCHLIST_SELECTION_OUTPUT"], encoding="utf-8")).get("summary_sent", False)).lower())')" != "true" ]; then
+            echo "筛选结果邮件发送失败。"
+            exit 1
           fi
       
       - name: 上传分析报告

@@ -79,20 +79,39 @@ def choose_candidates(rows: pd.DataFrame, watchlist: list[str], holdings: list[s
     return scored["code"].head(5).tolist()
 
 
+def fetch_watchlist_snapshot(universe: set[str]) -> pd.DataFrame:
+    from src.services.screening.snapshot import fetch_snapshot_with_fallback
+
+    best = None
+    best_count = 0
+    for source in ("sina", "efinance", "akshare_em", "em_datacenter"):
+        try:
+            frame = fetch_snapshot_with_fallback([source], required_columns=["code", "name"]).copy()
+            frame["code"] = frame["code"].astype(str).str.zfill(6)
+            named = frame["name"].notna() & frame["name"].astype(str).str.strip().ne("")
+            count = frame.loc[named & frame["code"].isin(universe), "code"].nunique()
+            logger.info("Snapshot %s covers %d of %d watchlist stocks", source, count, len(universe))
+            if count > best_count:
+                best, best_count = frame, count
+            if count == len(universe):
+                break
+        except Exception as exc:
+            logger.warning("Snapshot %s unavailable: %s", source, exc)
+    if best is None:
+        raise ValueError("watchlist is absent from all available market snapshots")
+    return best
+
+
 def select_watchlist(watchlist: list[str], holdings: list[str]) -> tuple[list[dict[str, str]], bool]:
     from src.core.trading_calendar import MarketPhase, build_market_phase_context, get_trading_dates
     from src.services.screening.daily import _DAILY_FEATURE_DEFAULTS, _normalize_daily_history, daily_history_is_stale, enrich_daily_features, fetch_daily_history
-    from src.services.screening.snapshot import fetch_snapshot_with_fallback
     from src.services.screening.strategy import load_strategy
 
     strategy = load_strategy(Path(__file__).parent / "screening" / "strategies" / "volume_breakout.yaml")
-    snapshot = fetch_snapshot_with_fallback(
-        ["sina", "efinance", "akshare_em", "em_datacenter"],
-        required_columns=["code", "name"],
-    )
     universe = set(watchlist) - set(holdings)
     if not universe:
         return [], False
+    snapshot = fetch_watchlist_snapshot(universe)
     snapshot["code"] = snapshot["code"].astype(str).str.zfill(6)
     snapshot = snapshot[snapshot["code"].isin(universe)].copy()
     seen_codes = set(snapshot["code"])

@@ -1,7 +1,42 @@
 import pandas as pd
+import pytest
 
 from src.services.screening.models import HardFilterConfig, ScreeningConfig
 from src.services.watchlist_digest import choose_candidates, parse_codes, parse_holdings, selection_summary, validate_daily_history
+
+
+def test_snapshot_falls_back_when_first_source_has_no_watchlist_coverage(monkeypatch):
+    from src.services import watchlist_digest as digest
+    from src.services.screening import snapshot
+
+    responses = {
+        "sina": pd.DataFrame([{"code": "600111", "name": "Other"}]),
+        "efinance": pd.DataFrame([{"code": "600499", "name": "A"}, {"code": "600000", "name": "B"}]),
+    }
+    calls = []
+    def fetch(sources, **_kwargs):
+        calls.append(sources[0])
+        return responses[sources[0]].copy()
+    monkeypatch.setattr(snapshot, "fetch_snapshot_with_fallback", fetch)
+    result = digest.fetch_watchlist_snapshot({"600499", "600000"})
+    assert set(result.code) == {"600499", "600000"}
+    assert calls == ["sina", "efinance"]
+
+
+def test_snapshot_uses_best_partial_coverage_when_all_sources_incomplete(monkeypatch):
+    from src.services import watchlist_digest as digest
+    from src.services.screening import snapshot
+
+    def fetch(sources, **_kwargs):
+        if sources[0] == "sina":
+            return pd.DataFrame([{"code": "600499", "name": "A"}])
+        if sources[0] == "efinance":
+            return pd.DataFrame([{"code": "600499", "name": "A"}, {"code": "600000", "name": "B"}])
+        raise RuntimeError("unavailable")
+    monkeypatch.setattr(snapshot, "fetch_snapshot_with_fallback", fetch)
+    assert len(digest.fetch_watchlist_snapshot({"600499", "600000", "601888"})) == 2
+    with pytest.raises(ValueError, match="watchlist"):
+        digest.fetch_watchlist_snapshot({"600123"})
 
 
 def test_parse_codes_keeps_unique_mainland_codes_and_rejects_other_markets():

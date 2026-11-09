@@ -1,9 +1,7 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 周一至周五北京时间 08:30 (UTC 00:30)
-  schedule:
-    - cron: '30 0 * * 1-5'     # A股交易日由筛选任务进一步检查
+  # Scheduled externally via workflow_dispatch to avoid duplicate reports.
   
   # 手动触发
   workflow_dispatch:

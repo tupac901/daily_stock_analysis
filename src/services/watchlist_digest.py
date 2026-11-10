@@ -29,6 +29,8 @@ def parse_codes(value: str) -> list[str]:
 
 
 def parse_holdings(value: str) -> list[str]:
+    if value.strip().upper() == "NO_HOLDINGS":
+        return []
     codes = list(dict.fromkeys(c for c in re.split(r"[,\s]+", value.upper()) if c))
     if not codes or any(not HOLDING_CODE.fullmatch(code) for code in codes):
         raise ValueError("Holdings must contain six-digit mainland security codes")
@@ -182,7 +184,7 @@ def selection_summary(result: dict) -> str:
         "## 候选（最多五只）",
         ", ".join(f'{item["code"]} {item["name"]}' for item in result["candidates"]) or "无",
         "## 持仓（单独分析）",
-        ", ".join(f'{code} {result.get("holding_names", {}).get(code, "")}'.strip() for code in result["holdings"]),
+        ", ".join(f'{code} {result.get("holding_names", {}).get(code, "")}'.strip() for code in result["holdings"]) or "空仓",
         "筛选基于最近一个完整交易日的日线，不是实时行情或当日竞价。成交额、换手率与 ST 状态仍需核验。",
         "部分自选日线不可用，候选覆盖不完整。" if result.get("partial") else "",
         "持仓与自选来自配置快照，不会自动同步同花顺。数据可能延迟，新闻可能缺失；请核对后自行决策。",

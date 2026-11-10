@@ -482,8 +482,12 @@ jobs:
             fi
             export STOCK_LIST="$(python -c 'import json,os; print(",".join(json.load(open(os.environ["WATCHLIST_SELECTION_OUTPUT"], encoding="utf-8"))["stocks"]))')"
             if [ -z "$STOCK_LIST" ]; then
-              echo "筛选结果与持仓均为空，终止运行。"
-              exit 1
+              if [ "$(python -c 'import json,os; print(str(json.load(open(os.environ["WATCHLIST_SELECTION_OUTPUT"], encoding="utf-8")).get("summary_sent", False)).lower())')" != "true" ]; then
+                echo "筛选结果邮件发送失败。"
+                exit 1
+              fi
+              echo "无候选且空仓，已发送筛选摘要。"
+              exit 0
             fi
           fi
           

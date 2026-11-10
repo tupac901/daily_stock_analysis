@@ -47,6 +47,7 @@ def test_parse_codes_keeps_unique_mainland_codes_and_rejects_other_markets():
 
 def test_holdings_are_deduplicated_and_invalid_input_is_rejected():
     assert parse_holdings("002724,002724") == ["002724"]
+    assert parse_holdings("NO_HOLDINGS") == []
     import pytest
     with pytest.raises(ValueError):
         parse_holdings("002724,invalid!")
@@ -118,6 +119,11 @@ def test_summary_distinguishes_candidates_from_holdings_and_failure():
     assert "002724 海洋王" in text
     assert "筛选不可用" in text
     assert "候选" in text
+
+
+def test_summary_explicitly_shows_empty_holdings():
+    text = selection_summary({"candidates": [], "holdings": [], "status": "no_qualifying_candidates"})
+    assert "空仓" in text
 
 
 def test_summary_includes_candidate_code_and_name():
@@ -275,6 +281,7 @@ def test_workflow_requires_selection_before_analysis_and_does_not_fall_back():
     assert '["stocks"]' in script
     assert 'get("summary_sent", False)' in script
     assert 'export STOCK_LIST="600519"' not in script
+    assert '无候选且空仓' in script
 
 
 def test_email_success_requires_email_channel(monkeypatch):

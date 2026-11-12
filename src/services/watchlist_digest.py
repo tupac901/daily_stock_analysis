@@ -133,9 +133,19 @@ def select_watchlist(watchlist: list[str], holdings: list[str]) -> tuple[list[di
     def checked_history(code: str, **kwargs: object) -> pd.DataFrame:
         hist = fetch_daily_history(code, **kwargs)
         context = build_market_phase_context(market="cn")
-        if context.phase in (MarketPhase.INTRADAY, MarketPhase.LUNCH_BREAK, MarketPhase.CLOSING_AUCTION):
-            raise ValueError("completed daily bars cannot be verified during trading")
-        if context.phase == MarketPhase.UNKNOWN or daily_history_is_stale(hist, code=code):
+        if context.phase == MarketPhase.UNKNOWN:
+            raise ValueError("daily history is stale or its trading date is unavailable")
+        date_column = next((name for name in ("date", "日期", "trade_date") if name in hist.columns), None)
+        if date_column is None:
+            raise ValueError("daily history has no dates")
+        dates = pd.to_datetime(hist[date_column].astype(str).str[:10], format="mixed", errors="coerce")
+        if dates.isna().any() or (dates.dt.date > context.session_date).any():
+            raise ValueError("daily history contains invalid or future dates")
+        incomplete_session = context.phase in (MarketPhase.PREMARKET, MarketPhase.INTRADAY, MarketPhase.LUNCH_BREAK, MarketPhase.CLOSING_AUCTION)
+        if context.effective_daily_bar_date > context.session_date or (incomplete_session and context.effective_daily_bar_date >= context.session_date):
+            raise ValueError("completed trading date is invalid")
+        hist = hist.loc[dates.dt.date <= context.effective_daily_bar_date].copy()
+        if hist.empty or dates.loc[hist.index].max().date() != context.effective_daily_bar_date or daily_history_is_stale(hist, code=code):
             raise ValueError("daily history is stale or its trading date is unavailable")
         raw = validate_daily_history(hist)
         dates = pd.to_datetime(raw["date"].astype(str).str[:10], format="mixed", errors="coerce")

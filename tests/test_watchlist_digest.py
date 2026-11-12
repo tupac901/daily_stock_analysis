@@ -236,7 +236,8 @@ def test_selection_checks_snapshot_against_history(monkeypatch):
     df = pd.DataFrame([{"code": "600499", "name": "A", "price": 888, "amount": 200, "change_pct": 999, "turnover_rate": 4, "volume_ratio": 2, "pe_ratio": -10}])
     monkeypatch.setattr(snapshot, "fetch_snapshot_with_fallback", lambda *_, **__: df.copy())
     monkeypatch.setattr(strategy, "load_strategy", lambda *_: SimpleNamespace(screening=ScreeningConfig()))
-    monkeypatch.setattr(trading_calendar, "build_market_phase_context", lambda **_: SimpleNamespace(phase=trading_calendar.MarketPhase.PREMARKET))
+    from datetime import date
+    monkeypatch.setattr(trading_calendar, "build_market_phase_context", lambda **_: SimpleNamespace(phase=trading_calendar.MarketPhase.PREMARKET, session_date=date(2026, 11, 5), effective_daily_bar_date=date(2026, 11, 4)))
     monkeypatch.setattr(trading_calendar, "get_trading_dates", lambda *_args: pd.DatetimeIndex(["2026-11-03", "2026-11-04"]))
     monkeypatch.setattr(daily, "daily_history_is_stale", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(daily, "fetch_daily_history", lambda *_args, **_kwargs: pd.DataFrame({"日期": ["2026-11-03", "2026-11-04"], "收盘": [10, 11], "开盘": [10, 10], "最高": [11, 11], "最低": [9, 9], "成交量": [100, 100]}))
@@ -263,8 +264,15 @@ def test_selection_checks_snapshot_against_history(monkeypatch):
     with pytest.raises(ValueError, match="stale"):
         digest.select_watchlist(["600499"], ["002724"])
     monkeypatch.setattr(daily, "daily_history_is_stale", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(trading_calendar, "build_market_phase_context", lambda **_: SimpleNamespace(phase=trading_calendar.MarketPhase.INTRADAY))
-    with pytest.raises(ValueError, match="completed"):
+    monkeypatch.setattr(trading_calendar, "build_market_phase_context", lambda **_: SimpleNamespace(phase=trading_calendar.MarketPhase.INTRADAY, session_date=date(2026, 11, 5), effective_daily_bar_date=date(2026, 11, 4)))
+    monkeypatch.setattr(daily, "fetch_daily_history", lambda *_args, **_kwargs: pd.DataFrame({"日期": ["2026-11-03", "2026-11-04", "2026-11-05"], "收盘": [10, 11, 99], "开盘": [10, 10, 90], "最高": [11, 11, 100], "最低": [9, 9, 89], "成交量": [100, 100, 100]}))
+    assert digest.select_watchlist(["600499"], ["002724"]) == ([{"code": "600499", "name": "A"}], False)
+    monkeypatch.setattr(trading_calendar, "build_market_phase_context", lambda **_: SimpleNamespace(phase=trading_calendar.MarketPhase.INTRADAY, session_date=date(2026, 11, 5), effective_daily_bar_date=date(2026, 11, 5)))
+    with pytest.raises(ValueError, match="completed trading date"):
+        digest.select_watchlist(["600499"], ["002724"])
+    monkeypatch.setattr(trading_calendar, "build_market_phase_context", lambda **_: SimpleNamespace(phase=trading_calendar.MarketPhase.INTRADAY, session_date=date(2026, 11, 5), effective_daily_bar_date=date(2026, 11, 4)))
+    monkeypatch.setattr(daily, "fetch_daily_history", lambda *_args, **_kwargs: pd.DataFrame({"日期": ["2026-11-03", "2026-11-06"], "收盘": [10, 11], "开盘": [10, 10], "最高": [11, 11], "最低": [9, 9], "成交量": [100, 100]}))
+    with pytest.raises(ValueError, match="future dates"):
         digest.select_watchlist(["600499"], ["002724"])
 
 

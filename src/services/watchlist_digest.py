@@ -80,6 +80,26 @@ def summarize_history_failures(errors: list[str]) -> dict[str, int]:
     return dict(counts)
 
 
+def fetch_verified_history(code, fetch, verify, kwargs):
+    frame = fetch(code, **kwargs)
+    try:
+        return verify(frame)
+    except ValueError as exc:
+        if str(exc) != "daily history has missing sessions" or kwargs.get("source") != "auto":
+            raise
+        original_error = exc
+    first_source = frame.attrs.get("daily_source")
+    for source in ("tencent", "sina", "akshare", "baostock"):
+        if source == first_source:
+            continue
+        try:
+            alternative = fetch(code, **{**kwargs, "source": source, "retries": 0})
+            return verify(alternative)
+        except Exception:
+            continue
+    raise original_error
+
+
 def choose_candidates(rows: pd.DataFrame, watchlist: list[str], holdings: list[str], config: ScreeningConfig) -> list[str]:
     if rows.empty or not {"code", "name", "daily_quality_score", "daily_quality_flags", "verified_fresh"}.issubset(rows.columns):
         return []
@@ -151,7 +171,9 @@ def select_watchlist(watchlist: list[str], holdings: list[str]) -> tuple[list[di
     daily_prices: dict[str, tuple[float, float]] = {}
 
     def checked_history(code: str, **kwargs: object) -> pd.DataFrame:
-        hist = fetch_daily_history(code, **kwargs)
+        return fetch_verified_history(code, fetch_daily_history, lambda hist: validate_completed_history(code, hist), kwargs)
+
+    def validate_completed_history(code: str, hist: pd.DataFrame) -> pd.DataFrame:
         context = build_market_phase_context(market="cn")
         if context.phase == MarketPhase.UNKNOWN:
             raise ValueError("daily history is stale or its trading date is unavailable")

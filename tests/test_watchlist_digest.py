@@ -129,6 +129,52 @@ def test_history_failure_diagnostics_use_safe_categories():
     assert "600499" not in str(counts)
 
 
+def test_missing_history_sessions_try_another_source():
+    from src.services.watchlist_digest import fetch_verified_history
+
+    calls = []
+    def fetch(_code, **kwargs):
+        calls.append(kwargs["source"])
+        frame = pd.DataFrame({"value": [1]})
+        frame.attrs["daily_source"] = "tencent" if kwargs["source"] == "auto" else kwargs["source"]
+        return frame
+    def verify(frame):
+        if frame.attrs["daily_source"] == "tencent":
+            raise ValueError("daily history has missing sessions")
+        return frame
+    result = fetch_verified_history("600499", fetch, verify, {"source": "auto", "retries": 1})
+    assert result.attrs["daily_source"] == "sina"
+    assert calls == ["auto", "sina"]
+
+
+def test_other_validation_errors_do_not_trigger_unrelated_retry():
+    from src.services.watchlist_digest import fetch_verified_history
+    calls = []
+    def fetch(_code, **kwargs):
+        calls.append(kwargs["source"])
+        return pd.DataFrame({"value": [1]})
+    def verify(_frame):
+        raise ValueError("daily history contains invalid or future dates")
+    with pytest.raises(ValueError, match="future dates"):
+        fetch_verified_history("600499", fetch, verify, {"source": "auto"})
+    assert calls == ["auto"]
+
+
+def test_missing_sessions_remain_rejected_when_alternatives_fail():
+    from src.services.watchlist_digest import fetch_verified_history
+    calls = []
+    def fetch(_code, **kwargs):
+        calls.append(kwargs["source"])
+        frame = pd.DataFrame({"value": [1]})
+        frame.attrs["daily_source"] = "tencent"
+        return frame
+    def verify(_frame):
+        raise ValueError("daily history has missing sessions")
+    with pytest.raises(ValueError, match="missing sessions"):
+        fetch_verified_history("600499", fetch, verify, {"source": "auto"})
+    assert calls == ["auto", "sina", "akshare", "baostock"]
+
+
 def test_real_volume_breakout_strategy_accepts_a_complete_qualifying_row():
     from pathlib import Path
     from src.services.screening.strategy import load_strategy

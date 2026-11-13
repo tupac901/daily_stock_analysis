@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
 
-from src.services.screening.filter import apply_hard_filters
+from src.services.screening.filter import apply_hard_filters, hard_filter_rejection_summary
 from src.services.screening.models import ScreeningConfig
 from src.services.screening.scorer import compute_screen_scores
 
@@ -72,9 +72,12 @@ def choose_candidates(rows: pd.DataFrame, watchlist: list[str], holdings: list[s
     df = df[df["name"].notna() & df["name"].astype(str).str.strip().ne("")]
     df = df[~df["name"].astype(str).str.contains(r"ST|退", case=False, na=True)]
     df = df[reliable_daily_mask(df)]
+    logger.info("Watchlist screening: reliable eligible rows=%d", len(df))
     if df.empty:
         return []
+    logger.info("Watchlist screening filter counts: %s", "; ".join(hard_filter_rejection_summary(df, config.hard_filters, limit=30)) or "none rejected")
     df = apply_hard_filters(df, config.hard_filters).drop_duplicates(subset="code")
+    logger.info("Watchlist screening: qualifying rows=%d", len(df))
     if df.empty:
         return []
     scored = compute_screen_scores(df, config).sort_values(["screen_score", "code"], ascending=[False, True])
@@ -171,6 +174,7 @@ def select_watchlist(watchlist: list[str], holdings: list[str]) -> tuple[list[di
     allowed = set(_DAILY_FEATURE_DEFAULTS) | {"code", "name", "verified_fresh", "price", "change_pct", "amount", "turnover_rate", "volume_ratio"}
     enriched = enriched.loc[:, [column for column in enriched.columns if column in allowed]]
     reliable_count = int(reliable_daily_mask(enriched).sum())
+    logger.info("Watchlist history verification: snapshot=%d, validated=%d, reliable=%d", len(snapshot), len(daily_prices), reliable_count)
     if reliable_count == 0:
         raise ValueError("no complete, reliable daily features")
     # Snapshot-only filters cannot be trusted before the open without a provider timestamp.

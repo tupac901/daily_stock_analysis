@@ -105,6 +105,17 @@ def test_unverified_freshness_never_qualifies():
     assert choose_candidates(rows, ["600499"], [], ScreeningConfig()) == []
 
 
+def test_candidate_diagnostics_report_filter_counts_without_codes(caplog):
+    import logging
+    rows = pd.DataFrame([
+        {"code": "600499", "name": "A", "price": 10, "change_pct": 1, "daily_quality_score": 100, "daily_quality_flags": "", "verified_fresh": True},
+    ])
+    with caplog.at_level(logging.INFO, logger="src.services.watchlist_digest"):
+        assert choose_candidates(rows, ["600499"], [], ScreeningConfig(hard_filters=HardFilterConfig(change_pct_min=2))) == []
+    assert "change_pct_min removed 1" in caplog.text
+    assert "600499" not in caplog.text
+
+
 def test_real_volume_breakout_strategy_accepts_a_complete_qualifying_row():
     from pathlib import Path
     from src.services.screening.strategy import load_strategy

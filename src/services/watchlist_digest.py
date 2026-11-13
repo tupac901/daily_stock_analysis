@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import sys
+from collections import Counter
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,22 @@ def reliable_daily_mask(df: pd.DataFrame) -> pd.Series:
     quality = pd.to_numeric(df["daily_quality_score"], errors="coerce")
     flags = df["daily_quality_flags"].fillna("").astype(str)
     return quality.between(80, 100) & df["verified_fresh"].eq(True) & ~flags.str.contains(r"stale|fetch_failed|invalid_ohlc|non_positive_price|negative_volume|missing_", case=False)
+
+
+def summarize_history_failures(errors: list[str]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for error in errors:
+        message = str(error).partition(":")[2].strip().lower()
+        if "missing sessions" in message:
+            category = "missing_sessions"
+        elif "stale or its trading date" in message:
+            category = "stale_or_unknown_date"
+        elif any(term in message for term in ("invalid", "incomplete", "missing", "inconsistent", "no dates", "future dates")):
+            category = "invalid_data"
+        else:
+            category = "other_or_provider_failure"
+        counts[category] += 1
+    return dict(counts)
 
 
 def choose_candidates(rows: pd.DataFrame, watchlist: list[str], holdings: list[str], config: ScreeningConfig) -> list[str]:
@@ -163,6 +180,8 @@ def select_watchlist(watchlist: list[str], holdings: list[str]) -> tuple[list[di
         return hist
 
     enriched = enrich_daily_features(snapshot, max_rows=len(snapshot), source="auto", fetch_retries=1, max_workers=3, history_fetcher=checked_history)
+    logger.info("Watchlist history failure categories: %s", summarize_history_failures(enriched.attrs.get("daily_errors", [])))
+    logger.info("Watchlist history successful sources: %s", enriched.attrs.get("daily_source_counts", {}))
     if not daily_prices:
         raise ValueError("no watchlist daily histories could be verified")
     enriched["verified_fresh"] = enriched["code"].isin(daily_prices)

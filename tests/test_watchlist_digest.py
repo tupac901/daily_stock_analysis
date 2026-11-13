@@ -116,6 +116,19 @@ def test_candidate_diagnostics_report_filter_counts_without_codes(caplog):
     assert "600499" not in caplog.text
 
 
+def test_history_failure_diagnostics_use_safe_categories():
+    from src.services.watchlist_digest import summarize_history_failures
+
+    counts = summarize_history_failures([
+        "600499: daily history has missing sessions",
+        "600000: daily history is stale or its trading date is unavailable",
+        "600001: daily history contains invalid or future dates",
+        "600002: network error with private details",
+    ])
+    assert counts == {"missing_sessions": 1, "stale_or_unknown_date": 1, "invalid_data": 1, "other_or_provider_failure": 1}
+    assert "600499" not in str(counts)
+
+
 def test_real_volume_breakout_strategy_accepts_a_complete_qualifying_row():
     from pathlib import Path
     from src.services.screening.strategy import load_strategy

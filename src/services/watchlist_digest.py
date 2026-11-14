@@ -16,8 +16,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
 
-from src.services.screening.filter import apply_hard_filters, hard_filter_rejection_summary
-from src.services.screening.models import ScreeningConfig
+from src.services.screening.filter import apply_hard_filters, check_hard_filters, hard_filter_rejection_summary
+from src.services.screening.models import HardFilterConfig, ScreeningConfig
 from src.services.screening.scorer import compute_screen_scores
 
 logger = logging.getLogger(__name__)
@@ -121,6 +121,33 @@ def choose_candidates(rows: pd.DataFrame, watchlist: list[str], holdings: list[s
     return scored["code"].head(5).tolist()
 
 
+def choose_tiered_candidates(rows: pd.DataFrame, watchlist: list[str], holdings: list[str], config: ScreeningConfig) -> list[dict]:
+    strict_codes = choose_candidates(rows, watchlist, holdings, config)
+    if rows.empty or not {"code", "name", "daily_quality_score", "daily_quality_flags", "verified_fresh"}.issubset(rows.columns):
+        return []
+    df = rows.copy()
+    df["code"] = df["code"].astype(str).str.zfill(6)
+    df = df[df["code"].isin(parse_codes(",".join(watchlist))) & ~df["code"].isin(holdings)]
+    df = df[df["name"].notna() & df["name"].astype(str).str.strip().ne("")]
+    df = df[~df["name"].astype(str).str.contains(r"ST|退", case=False, na=True)]
+    df = df[reliable_daily_mask(df)].drop_duplicates(subset="code")
+    names = dict(zip(df["code"], df["name"].astype(str)))
+    result = [{"code": code, "name": names[code], "tier": "strict", "risks": []} for code in strict_codes if code in names]
+    if len(result) >= 5 or not {"price_above_ma20", "signal_score", "price"}.issubset(df.columns):
+        return result[:5]
+    minimum = HardFilterConfig(exclude_st=True, require_price_above_ma20=True, signal_score_min=60)
+    eligible = apply_hard_filters(df[~df["code"].isin(strict_codes)], minimum)
+    eligible = eligible[pd.to_numeric(eligible["price"], errors="coerce").gt(0)]
+    eligible = eligible.sort_values(["signal_score", "code"], ascending=[False, True])
+    labels = {"change_pct_min": "涨幅不足", "change_pct_max": "涨幅过高", "require_price_above_ma20": "未站上20日均线", "signal_score_min": "技术分不足", "macd_status_whitelist": "MACD状态不符", "breakout_20d_pct_min": "尚未突破", "range_20d_pct_max": "近期波动过大", "volume_ratio_20d_min": "成交量未达标", "body_pct_min": "K线实体不足", "consolidation_days_20d_min": "整理天数不足"}
+    for _, row in eligible.head(5 - len(result)).iterrows():
+        snapshot = {str(key): (None if pd.isna(value) else value.item() if isinstance(value, np.generic) else value) for key, value in row.items()}
+        checks = check_hard_filters(snapshot, config.hard_filters)
+        risks = [labels.get(check["filter"], check["filter"] + "未满足") + ("（数据缺失）" if check["status"] == "missing" else "") for check in checks if check["status"] != "pass"]
+        result.append({"code": row["code"], "name": str(row["name"]), "tier": "observe", "risks": risks or ["未通过严格策略"]})
+    return result
+
+
 def fetch_watchlist_snapshot(universe: set[str]) -> pd.DataFrame:
     from src.services.screening.snapshot import fetch_snapshot_with_fallback
 
@@ -221,14 +248,13 @@ def select_watchlist(watchlist: list[str], holdings: list[str]) -> tuple[list[di
     # Snapshot-only filters cannot be trusted before the open without a provider timestamp.
     daily_filters = replace(strategy.screening.hard_filters, amount_min=None, turnover_rate_min=None, volume_ratio_min=None)
     config = replace(strategy.screening, hard_filters=daily_filters)
-    codes = choose_candidates(enriched, watchlist, holdings, config)
-    names = dict(zip(enriched["code"], enriched["name"].astype(str)))
-    return [{"code": code, "name": names[code]} for code in codes], missing_names or reliable_count < len(snapshot) or len(seen_codes) < len(universe)
+    candidates = choose_tiered_candidates(enriched, watchlist, holdings, config)
+    return candidates, missing_names or reliable_count < len(snapshot) or len(seen_codes) < len(universe)
 
 
 def selection_summary(result: dict) -> str:
     status_text = {
-        "screened": "通过项目内置放量突破规则筛选，候选不代表买入建议。",
+        "screened": "候选基于历史日线筛选，不代表买入建议。",
         "no_qualifying_candidates": "本次没有符合条件的自选股，不强行凑满五只。",
         "screening_unavailable": "筛选不可用：行情或日线数据无法验证，本次不提供候选。",
         "calendar_unavailable": "交易日历不可用：本次未筛选或分析，请检查配置和日历更新。",
@@ -236,8 +262,10 @@ def selection_summary(result: dict) -> str:
     return "\n".join([
         "# 自选筛选与持仓",
         status_text[result["status"]],
-        "## 候选（最多五只）",
-        ", ".join(f'{item["code"]} {item["name"]}' for item in result["candidates"]) or "无",
+        "## 严格策略信号",
+        ", ".join(f'{item["code"]} {item["name"]}' for item in result["candidates"] if item.get("tier", "strict") == "strict") or "无",
+        "## 观察候选（未通过严格策略）",
+        "\n".join(f'{item["code"]} {item["name"]}：' + "；".join(item.get("risks", ["未通过严格策略"])) for item in result["candidates"] if item.get("tier") == "observe") or "无",
         "## 持仓（单独分析）",
         ", ".join(f'{code} {result.get("holding_names", {}).get(code, "")}'.strip() for code in result["holdings"]) or "空仓",
         "筛选基于最近一个完整交易日的日线，不是实时行情或当日竞价。成交额、换手率与 ST 状态仍需核验。",

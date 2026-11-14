@@ -116,6 +116,59 @@ def test_candidate_diagnostics_report_filter_counts_without_codes(caplog):
     assert "600499" not in caplog.text
 
 
+def test_two_tier_candidates_preserve_strict_signals_and_identify_observation_risk():
+    from src.services.watchlist_digest import choose_tiered_candidates
+
+    rows = pd.DataFrame([
+        {"code": "600001", "name": "Alpha", "price": 10, "change_pct": 3, "price_above_ma20": True, "signal_score": 75, "daily_quality_score": 100, "daily_quality_flags": "", "verified_fresh": True},
+        {"code": "600002", "name": "Observe", "price": 10, "change_pct": 1, "price_above_ma20": True, "signal_score": 70, "daily_quality_score": 100, "daily_quality_flags": "", "verified_fresh": True},
+        {"code": "600003", "name": "Holding", "price": 10, "change_pct": 3, "price_above_ma20": True, "signal_score": 80, "daily_quality_score": 100, "daily_quality_flags": "", "verified_fresh": True},
+        {"code": "600004", "name": "ST Risk", "price": 10, "change_pct": 3, "price_above_ma20": True, "signal_score": 80, "daily_quality_score": 100, "daily_quality_flags": "", "verified_fresh": True},
+        {"code": "600005", "name": "Stale", "price": 10, "change_pct": 1, "price_above_ma20": True, "signal_score": 80, "daily_quality_score": 100, "daily_quality_flags": "stale_cache", "verified_fresh": True},
+        {"code": "600006", "name": "Weak", "price": 10, "change_pct": 1, "price_above_ma20": False, "signal_score": 30, "daily_quality_score": 100, "daily_quality_flags": "", "verified_fresh": True},
+    ])
+    config = ScreeningConfig(hard_filters=HardFilterConfig(exclude_st=True, change_pct_min=2))
+    result = choose_tiered_candidates(rows, rows.code.tolist(), ["600003"], config)
+    assert [(x["code"], x["tier"]) for x in result] == [("600001", "strict"), ("600002", "observe")]
+    assert any("涨幅" in reason for reason in result[1]["risks"])
+
+
+def test_two_tier_summary_does_not_label_observations_as_strict():
+    result = {"status": "screened", "candidates": [{"code": "600001", "name": "One", "tier": "strict"}, {"code": "600002", "name": "Two", "tier": "observe", "risks": ["涨幅未达标"]}], "holdings": []}
+    summary = selection_summary(result)
+    assert "严格策略信号" in summary and "观察候选" in summary
+    assert "600002 Two" in summary and "涨幅未达标" in summary
+    assert "不代表买入建议" in summary
+
+
+def test_two_tier_candidates_limit_to_five_and_exclude_other_boards():
+    from src.services.watchlist_digest import choose_tiered_candidates
+    rows = pd.DataFrame([
+        {"code": f"60000{i}", "name": f"Company{i}", "price": 10, "change_pct": 1, "price_above_ma20": True, "signal_score": 70 + i, "daily_quality_score": 100, "daily_quality_flags": "", "verified_fresh": True} for i in range(1, 8)
+    ] + [{"code": "300750", "name": "Growth", "price": 10, "change_pct": 1, "price_above_ma20": True, "signal_score": 100, "daily_quality_score": 100, "daily_quality_flags": "", "verified_fresh": True}])
+    result = choose_tiered_candidates(rows, rows.code.tolist(), [], ScreeningConfig(hard_filters=HardFilterConfig(change_pct_min=2)))
+    assert len(result) == 5
+    assert len({item["code"] for item in result}) == 5
+    assert all(item["tier"] == "observe" and item["code"] != "300750" for item in result)
+
+
+def test_main_sends_observation_candidates_to_detailed_analysis(monkeypatch, tmp_path):
+    import json
+    from src.services import watchlist_digest as digest
+    monkeypatch.setenv("STOCK_LIST", "600499,002724")
+    monkeypatch.setenv("WATCHLIST_HOLDINGS", "002724")
+    output = tmp_path / "result.json"
+    monkeypatch.setenv("WATCHLIST_SELECTION_OUTPUT", str(output))
+    monkeypatch.setattr(digest, "is_cn_trading_day", lambda: True)
+    monkeypatch.setattr(digest, "lookup_holding_names", lambda _: {})
+    monkeypatch.setattr(digest, "select_watchlist", lambda *_: ([{"code": "600499", "name": "A", "tier": "observe", "risks": ["涨幅不足"]}], False))
+    monkeypatch.setattr(digest, "send_selection_summary", lambda _: True)
+    assert digest.main() == 0
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert result["stocks"] == ["600499", "002724"]
+    assert result["candidates"][0]["tier"] == "observe"
+
+
 def test_history_failure_diagnostics_use_safe_categories():
     from src.services.watchlist_digest import summarize_history_failures
 
@@ -327,7 +380,7 @@ def test_selection_checks_snapshot_against_history(monkeypatch):
         assert "pe_ratio" not in frame.columns
         return frame.assign(screen_score=50)
     monkeypatch.setattr(digest, "compute_screen_scores", score_checked)
-    assert digest.select_watchlist(["600499"], ["002724"]) == ([{"code": "600499", "name": "A"}], False)
+    assert digest.select_watchlist(["600499"], ["002724"]) == ([{"code": "600499", "name": "A", "tier": "strict", "risks": []}], False)
     assert digest.select_watchlist(["600499", "600000"], ["002724"])[1] is True
     monkeypatch.setattr(daily, "daily_history_is_stale", lambda *_args, **_kwargs: True)
     import pytest
@@ -336,7 +389,7 @@ def test_selection_checks_snapshot_against_history(monkeypatch):
     monkeypatch.setattr(daily, "daily_history_is_stale", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(trading_calendar, "build_market_phase_context", lambda **_: SimpleNamespace(phase=trading_calendar.MarketPhase.INTRADAY, session_date=date(2026, 11, 5), effective_daily_bar_date=date(2026, 11, 4)))
     monkeypatch.setattr(daily, "fetch_daily_history", lambda *_args, **_kwargs: pd.DataFrame({"日期": ["2026-11-03", "2026-11-04", "2026-11-05"], "收盘": [10, 11, 99], "开盘": [10, 10, 90], "最高": [11, 11, 100], "最低": [9, 9, 89], "成交量": [100, 100, 100]}))
-    assert digest.select_watchlist(["600499"], ["002724"]) == ([{"code": "600499", "name": "A"}], False)
+    assert digest.select_watchlist(["600499"], ["002724"]) == ([{"code": "600499", "name": "A", "tier": "strict", "risks": []}], False)
     monkeypatch.setattr(trading_calendar, "build_market_phase_context", lambda **_: SimpleNamespace(phase=trading_calendar.MarketPhase.INTRADAY, session_date=date(2026, 11, 5), effective_daily_bar_date=date(2026, 11, 5)))
     with pytest.raises(ValueError, match="completed trading date"):
         digest.select_watchlist(["600499"], ["002724"])
